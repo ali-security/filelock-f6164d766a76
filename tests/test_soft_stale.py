@@ -29,7 +29,7 @@ from tests.capability_marks import (
     NEEDS_SYMLINK,
     NEEDS_UNLINK_OPEN_FILE,
 )
-from tests.conftest import DEAD_OWNER, STALE_BREAKERS, OplockHolder, held_after_reclaim
+from tests.conftest import DEAD_OWNER, STALE_BREAKERS, OplockHolder, acquire_after_reclaim, held_after_reclaim
 from tests.pid_namespace_helpers import pin_pid_namespace
 from tests.process_helpers import break_then_hang_after_exchange, call_within, cleanup_processes
 
@@ -89,8 +89,11 @@ def test_stale_lock_not_broken_when_process_alive(lock_path: Path, mocker: Mocke
 
 
 def test_stale_lock_not_broken_different_hostname(lock_path: Path) -> None:
-    lock_path.write_text(_holder(_DEAD_PID, host="other-host.example.com"), encoding="utf-8")
-    _assert_times_out(lock_path)
+    marker = _holder(_DEAD_PID, host="other-host.example.com")
+    lock_path.write_text(marker, encoding="utf-8")
+    lock = SoftFileLock(lock_path)
+    acquire_after_reclaim(lock)
+    assert (lock.is_locked, lock_path.read_text(encoding="utf-8")) == (False, marker)
 
 
 @pytest.mark.parametrize(
@@ -132,6 +135,9 @@ def test_recycled_pid_marker_self_heals(lock_path: Path) -> None:
     _assert_self_heals(lock_path)
 
 
+@pytest.mark.skipif(  # pragma: linux cover
+    sys.platform not in {"linux", "android"}, reason="PID namespaces exist only on Linux"
+)
 @_REQUIRES_START_TOKEN
 @pytest.mark.parametrize(
     ("contender_namespace", "reclaimed"),
