@@ -79,13 +79,14 @@ class AsyncReadWriteLock:
         self._creator_pid = creator_pid
         self._fork_invalidated = False
         self._closed = False
-        _register_fork_object(self)
         with _fork_transition():
             self._lock = ReadWriteLock(lock_file, timeout, blocking=blocking, is_singleton=is_singleton)
             self._owners = _task_owners_for(self._lock)
             self._loop = loop
             self._owns_executor = executor is None
             self._executor = executor or ThreadPoolExecutor(max_workers=1)
+            # A failed constructor must not register a child reset that reads unset fields.
+            _register_fork_object(self)
             if os.getpid() != creator_pid:  # pragma: forked child
                 msg = "AsyncReadWriteLock construction cannot continue after fork"
                 raise RuntimeError(msg)
