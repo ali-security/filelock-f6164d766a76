@@ -6,14 +6,16 @@ import os
 import pickle  # ruff:ignore[suspicious-pickle-import]  # round-trip uses bytes produced in this test
 import re
 import secrets
+import signal
 import socket
 import stat
 import subprocess  # ruff:ignore[suspicious-subprocess-import]  # a finished child yields a PID that no longer runs
 import sys
 import threading
 import time
-from errno import EACCES, EEXIST, EIO, ENOENT, ENOSPC, EPERM, ESTALE, EXDEV
+from errno import EACCES, EEXIST, EIO, ENOENT, ENOSPC, EPERM, ESTALE, EWOULDBLOCK, EXDEV
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Final, NoReturn
 
 import pytest
@@ -52,6 +54,9 @@ _NEEDS_FD_DIRECTORY: Final[pytest.MarkDecorator] = pytest.mark.skipif(
 
 # Only NTFS refuses every open of a name whose deletion is pending while the deleting handle stays open.
 _WINDOWS_ONLY: Final[pytest.MarkDecorator] = pytest.mark.skipif(sys.platform != "win32", reason="Windows only")
+_NEEDS_FILE_LEASE: Final[pytest.MarkDecorator] = pytest.mark.skipif(
+    not CAPABILITIES["file-lease"], reason="leasing the sentinel needs Linux F_SETLEASE on a supported filesystem"
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -973,6 +978,85 @@ def test_strict_soft_unreadable_lock_path_blocks(tmp_path: Path, mocker: MockerF
     assert lock.lock_path_occupant == "a file it cannot read (sharing violation)"
 
 
+def _patch_strict_clock(
+    mocker: MockerFixture,
+    *,
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+    wall: Callable[[], float] = time.time,
+) -> None:
+    mocker.patch("filelock._strict.time", new=SimpleNamespace(monotonic=monotonic, sleep=sleep, time=wall))
+
+
+def test_strict_soft_answers_a_sentinel_break(lock_path: Path, mocker: MockerFixture) -> None:
+    real_open = os.open
+    breaking = True
+
+    def answer_after_one_open(path: _PathValue, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+        nonlocal breaking
+        if breaking and Path(os.fsdecode(path)).name == lock_path.name:
+            breaking = False
+            raise BlockingIOError(EWOULDBLOCK, "break in progress")
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    _route_claim_opens_through_os_open(mocker)
+    mocker.patch("filelock._strict.os.open", autospec=True, side_effect=answer_after_one_open)
+
+    with StrictSoftFileLock(lock_path, timeout=0) as lock:
+        assert (breaking, lock.is_locked) == (False, True)
+
+
+def test_strict_soft_unanswered_sentinel_break_is_contention(lock_path: Path, mocker: MockerFixture) -> None:
+    real_open = os.open
+    now = 0.0
+
+    def never_answered(path: _PathValue, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+        if Path(os.fsdecode(path)).name == lock_path.name:
+            raise BlockingIOError(EWOULDBLOCK, "break in progress")
+        return real_open(path, flags, mode, dir_fd=dir_fd)  # pragma: no cover  # an occupied path publishes nothing
+
+    def tick(seconds: float) -> None:
+        nonlocal now
+        now += seconds
+
+    _patch_strict_clock(mocker, monotonic=lambda: now, sleep=tick)
+    _route_claim_opens_through_os_open(mocker)
+    mocker.patch("filelock._strict.os.open", autospec=True, side_effect=never_answered)
+    lock = StrictSoftFileLock(lock_path, timeout=0)
+
+    with pytest.raises(Timeout):
+        lock.acquire()
+    assert (lock.lock_path_occupant, 0.5 <= now < 1) == ("a file it cannot read (break in progress)", True)
+
+
+@pytest.fixture
+def leased_sentinel(lock_path: Path) -> Iterator[Path]:  # pragma: needs file-lease
+    assert sys.platform != "win32"
+    import fcntl
+
+    previous_handler = signal.signal(signal.SIGIO, signal.SIG_IGN)
+    lease_fd = os.open(lock_path, os.O_RDWR)
+    try:
+        fcntl.fcntl(lease_fd, fcntl.F_SETLEASE, fcntl.F_WRLCK)
+        yield lock_path
+    finally:
+        os.close(lease_fd)
+        signal.signal(signal.SIGIO, previous_handler)
+
+
+@_NEEDS_FILE_LEASE  # pragma: needs file-lease
+@pytest.mark.parametrize(
+    ("timeout", "blocking"), [pytest.param(0.1, True, id="timeout"), pytest.param(-1, False, id="non-blocking")]
+)
+def test_strict_soft_lease_on_sentinel_keeps_deadline(leased_sentinel: Path, timeout: float, *, blocking: bool) -> None:
+    lock = StrictSoftFileLock(leased_sentinel)
+
+    started = time.monotonic()
+    with pytest.raises(Timeout):
+        lock.acquire(timeout=timeout, blocking=blocking)
+    assert time.monotonic() - started < 5
+
+
 def test_strict_soft_exited_soft_lock_owner_raises_without_waiting(tmp_path: Path, mocker: MockerFixture) -> None:
     lock_path = tmp_path / "resource.lock"
     pid = subprocess.run(
@@ -1239,11 +1323,15 @@ def test_strict_soft_claim_replaced_while_opening_fails_closed(
 
 
 def _route_claim_opens_through_os_open(mocker: MockerFixture) -> None:
-    # Windows opens a claim through NtCreateFile so its owner can still unlink it, which an os.open fault would miss.
+    # Windows uses NtCreateFile for claims and the sentinel, which an os.open fault would miss.
     if sys.platform == "win32":  # pragma: win32 cover
         mocker.patch(
             "filelock._strict._open_deletable_for_reading",
             side_effect=lambda path: os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0)),
+        )
+        mocker.patch(
+            "filelock._strict.open_read_without_oplock_wait",
+            side_effect=lambda path, **_: os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0)),
         )
 
 
