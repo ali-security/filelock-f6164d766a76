@@ -19,6 +19,7 @@ from tests.capability_marks import (
     NEEDS_FORK,
     XFAIL_WITHOUT_COROUTINE_CANCELLATION,
 )
+from tests.async_filelock_cancellation_helpers import FailingSubmitExecutor
 from tests.fork_helpers import exit_child, fork_process
 from tests.read_write_helpers import ACQUIRE_SETTINGS, INVALID_TIMEOUTS
 
@@ -70,6 +71,30 @@ def test_failed_async_construction_keeps_other_fork_resets(tmp_path: Path) -> No
     finally:
         parent.release()
     assert failed.value.errno == errno.ELOOP
+
+
+@pytest.mark.asyncio
+async def test_async_release_whose_submission_failed_never_runs(lock_file: str) -> None:
+    with FailingSubmitExecutor(after_call_ran=False) as executor:
+        lock = AsyncReadWriteLock(lock_file, is_singleton=False, executor=executor)
+        await lock.acquire_write()
+        finish_blocker = threading.Event()
+        blocker = executor.submit(finish_blocker.wait, 5)
+        executor.fail_next_submit = True
+
+        with pytest.raises(RuntimeError, match="can't start new thread"):
+            await lock.release()
+        finish_blocker.set()
+        assert blocker.result(timeout=5)
+        # The pool has one worker, so it took the call queued behind the blocker before it ran this one.
+        executor.submit(threading.get_ident).result(timeout=5)
+
+        contender = ReadWriteLock(lock_file, is_singleton=False)
+        with pytest.raises(Timeout):
+            contender.acquire_read(blocking=False)
+        contender.close()
+        await lock.release()
+        await lock.close()
 
 
 @pytest.mark.asyncio

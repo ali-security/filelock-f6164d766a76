@@ -22,10 +22,10 @@ from filelock._api import (
 )
 from filelock._async import (
     _BackendOutcome,
-    _capture_call,
     _drain_future,
     _future_result,
     _raise_cancelled_error,
+    _submit_call,
     _task_owners_for,
     _wait_until_done,
 )
@@ -305,10 +305,8 @@ class AsyncReadWriteLock:
     def _submit(
         self, func: Callable[_P, _R], *args: _P.args, **kwargs: _P.kwargs
     ) -> asyncio.Future[_BackendOutcome[_R]]:
-        return (self._loop or asyncio.get_running_loop()).run_in_executor(
-            self._executor,
-            _capture_call,
-            functools.partial(func, *args, **kwargs),
+        return _submit_call(
+            self._loop or asyncio.get_running_loop(), self._executor, functools.partial(func, *args, **kwargs)
         )
 
     def _shutdown_owned_executor(self) -> None:

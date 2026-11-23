@@ -331,8 +331,30 @@ def _run_in_executor(
             result = _BackendOutcome(error=RuntimeError(msg))
         outcome.set_result(result)
 
-    loop.run_in_executor(executor, _capture_call, func).add_done_callback(settle)
+    _submit_call(loop, executor, func).add_done_callback(settle)
     return outcome
+
+
+def _submit_call(
+    loop: asyncio.AbstractEventLoop, executor: Executor | None, func: Callable[[], _T]
+) -> asyncio.Future[_BackendOutcome[_T]]:
+    # ThreadPoolExecutor can leave a call queued when starting a worker raises; do not run it after submission fails.
+    call: ConcurrentFuture[_BackendOutcome[_T]] = ConcurrentFuture()
+
+    def run() -> _BackendOutcome[_T]:
+        if not call.set_running_or_notify_cancel():
+            return _BackendOutcome()
+        result = _capture_call(func)
+        call.set_result(result)
+        return result
+
+    try:
+        return loop.run_in_executor(executor, run)
+    except BaseException:
+        if call.cancel():
+            raise
+        # The worker started before submission raised, so its result must settle the backend state.
+        return asyncio.wrap_future(call, loop=loop)
 
 
 def _capture_call(func: Callable[[], _T]) -> _BackendOutcome[_T]:
@@ -371,6 +393,7 @@ __all__ = [
     "_future_result",
     "_raise_cancelled_error",
     "_run_in_executor",
+    "_submit_call",
     "_task_owners_for",
     "_wait_until_done",
 ]

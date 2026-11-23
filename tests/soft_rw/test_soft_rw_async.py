@@ -14,6 +14,7 @@ from filelock import Timeout
 from filelock._soft_rw import AsyncSoftReadWriteLock, SoftReadWriteLock
 from filelock._soft_rw._protocol import GenerationLog
 from filelock._soft_rw._storage import OsFiles
+from tests.async_filelock_cancellation_helpers import FailingSubmitExecutor
 from tests.capability_marks import XFAIL_WITHOUT_COROUTINE_CANCELLATION
 
 if TYPE_CHECKING:
@@ -205,6 +206,30 @@ async def test_async_acquire_accepts_infinite_timeout(tmp_path: Path, mode: Lite
             with pytest.raises(Timeout):
                 await asyncio.create_task(lock.acquire_write(blocking=False))
     finally:
+        await lock.close()
+
+
+@pytest.mark.asyncio
+async def test_async_release_whose_submission_failed_never_runs(tmp_path: Path) -> None:
+    with FailingSubmitExecutor(after_call_ran=False) as executor:
+        lock = _make(tmp_path, executor=executor)
+        await lock.acquire_write()
+        finish_blocker = threading.Event()
+        blocker = executor.submit(finish_blocker.wait, 5)
+        executor.fail_next_submit = True
+
+        with pytest.raises(RuntimeError, match="can't start new thread"):
+            await lock.release()
+        finish_blocker.set()
+        assert blocker.result(timeout=5)
+        # The pool has one worker, so it took the call queued behind the blocker before it ran this one.
+        executor.submit(threading.get_ident).result(timeout=5)
+
+        contender = SoftReadWriteLock(str(tmp_path / "foo.lock"), is_singleton=False)
+        with pytest.raises(Timeout):
+            contender.acquire_read(blocking=False)
+        contender.close()
+        await lock.release()
         await lock.close()
 
 

@@ -3,12 +3,15 @@ from __future__ import annotations
 import importlib
 import multiprocessing
 import threading
-from typing import TYPE_CHECKING, cast
+from concurrent.futures import ThreadPoolExecutor
+from typing import TYPE_CHECKING, ParamSpec, TypeVar, cast
 
 from filelock import FileLock, Timeout
 
 if TYPE_CHECKING:
     import asyncio
+    from collections.abc import Callable
+    from concurrent.futures import Future
     from multiprocessing.sharedctypes import Synchronized
     from typing import Protocol
 
@@ -17,6 +20,10 @@ if TYPE_CHECKING:
 
         @staticmethod
         def flock(fd: int, operation: int) -> None: ...
+
+
+_P = ParamSpec("_P")
+_T = TypeVar("_T")
 
 
 def assert_cancellation_message(error: asyncio.CancelledError, message: str) -> None:
@@ -65,4 +72,28 @@ def _hold_file_lock(lock_file: str, holder_started: threading.Event, finish_hold
         assert finish_holder.wait(timeout=5)
 
 
-__all__ = ["assert_cancellation_message", "assert_file_lock_state", "get_fcntl", "start_file_lock_holder"]
+class FailingSubmitExecutor(ThreadPoolExecutor):
+    # Fails one submission after the pool queued the call, as a worker thread that cannot start does.
+    def __init__(self, *, after_call_ran: bool) -> None:
+        super().__init__(max_workers=1)
+        self.fail_next_submit = False
+        self._after_call_ran = after_call_ran
+
+    def submit(self, fn: Callable[_P, _T], /, *args: _P.args, **kwargs: _P.kwargs) -> Future[_T]:
+        future = super().submit(fn, *args, **kwargs)
+        if not self.fail_next_submit:
+            return future
+        self.fail_next_submit = False
+        if self._after_call_ran:
+            future.result(timeout=5)
+        msg = "can't start new thread"
+        raise RuntimeError(msg)
+
+
+__all__ = [
+    "FailingSubmitExecutor",
+    "assert_cancellation_message",
+    "assert_file_lock_state",
+    "get_fcntl",
+    "start_file_lock_holder",
+]
