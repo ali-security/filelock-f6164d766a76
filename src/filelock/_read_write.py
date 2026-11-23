@@ -781,6 +781,12 @@ class ReadWriteLock(metaclass=_ReadWriteLockMeta):
             acquisition_error: BaseException
             if isinstance(error, sqlite3.OperationalError) and "database is locked" in str(error):
                 acquisition_error = Timeout(self.lock_file)
+            elif (
+                mode == "write"
+                and isinstance(error, sqlite3.OperationalError)
+                and getattr(error, "sqlite_errorcode", None) == sqlite3.SQLITE_READONLY
+            ):
+                acquisition_error = ValueError(f"SQLite opened the lock database read-only: {self.lock_file!r}")
             else:
                 acquisition_error = error
             try:
@@ -839,7 +845,7 @@ class ReadWriteLock(metaclass=_ReadWriteLockMeta):
                 connection.executescript(f"PRAGMA busy_timeout={timeout_ms}; PRAGMA journal_mode=MEMORY;").close()
                 # Use legacy journal mode (not WAL) because WAL does not block readers while a concurrent EXCLUSIVE
                 # write transaction is active, which makes read-write locking impossible without modifying table data.
-                # MEMORY is safe here since no writes happen, so a crash cannot corrupt the DB.
+                # The write probe changes one header page in memory. Release rolls it back.
                 # See https://sqlite.org/lang_transaction.html#deferred_immediate_and_exclusive_transactions
                 #
                 # Recompute the remaining timeout after the blocking journal_mode pragma.
@@ -859,6 +865,11 @@ class ReadWriteLock(metaclass=_ReadWriteLockMeta):
                     if ("wal",) in cursor.fetchall():
                         msg = f"refusing a lock database switched to WAL mode while acquiring: {self.lock_file!r}"
                         raise ValueError(msg)
+                if mode == "write":
+                    # BEGIN EXCLUSIVE can succeed on a read-only connection.
+                    with closing(connection.execute("PRAGMA user_version;")) as cursor:
+                        (version,) = cursor.fetchone()
+                    connection.execute(f"PRAGMA user_version={int(version)};").close()
             self._raise_if_database_replaced(connection)
 
     def _raise_if_database_replaced(self, connection: _ForkSafeConnection) -> None:
@@ -988,7 +999,7 @@ def _connect(database: str, *, factory: type[_ForkSafeConnection], timeout: floa
         link: _LinkDirectory | None = None
         # A Windows lock belongs to the handle that took it, so closing this one leaves SQLite's locks in place.
         try:
-            _raise_if_wal(fd, database)
+            _raise_if_unsupported_sqlite_format(fd, database)
             target = database
             try:
                 with ExitStack() as pin:
@@ -1030,7 +1041,7 @@ def _connect_through_descriptor(  # pragma: win32 no cover
         identity, fd, _ = probe
         # Releases a finalizer queued while the table was locked.
         _PROBE_DESCRIPTORS.drain()
-        _raise_if_wal(fd, database)
+        _raise_if_unsupported_sqlite_format(fd, database)
         target = database
         # SQLite opens the name it is given, following symlinks, and uses the -journal, -wal and -shm names beside it,
         # so the database name is safe only where no process of another account can create names, and where none was
@@ -1306,14 +1317,21 @@ def _open_lock_database(database: str, *, oplock_wait: float = 0) -> int:
     return fd  # pragma: win32 no cover
 
 
-def _raise_if_wal(fd: int, database: str) -> None:
+def _raise_if_unsupported_sqlite_format(fd: int, database: str) -> None:
     # SQLite derives the -wal name from the path it connects through, a descriptor name on POSIX, and WAL never blocks
     # readers behind a writer, so the lock cannot work on such a database.
     # pread: an adopted probe is shared, so its file offset is not this connect's to move.
     header: Final = os.pread(fd, _HEADER_SIZE, 0) if hasattr(os, "pread") else os.read(fd, _HEADER_SIZE)
-    if header.startswith(_SQLITE_MAGIC) and _WAL_FORMAT_VERSION in header[_FORMAT_VERSIONS]:
-        msg = f"refusing a WAL-mode lock database: {database!r}; give ReadWriteLock a file of its own"
-        raise ValueError(msg)
+    # A write version above 2 makes SQLite treat the file as read-only, so BEGIN EXCLUSIVE can grant only a read hold.
+    # https://www.sqlite.org/fileformat.html#file_format_version_numbers
+    if header.startswith(_SQLITE_MAGIC):
+        versions: Final = header[_FORMAT_VERSIONS]
+        if _WAL_FORMAT_VERSION in versions:
+            msg = f"refusing a WAL-mode lock database: {database!r}; give ReadWriteLock a file of its own"
+            raise ValueError(msg)
+        if versions != b"\x01\x01":
+            msg = f"refusing a lock database with unsupported SQLite format versions: {database!r}"
+            raise ValueError(msg)
 
 
 @contextmanager
