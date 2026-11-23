@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import ctypes
+import itertools
 import os
 import re
+import string
 import struct
 import subprocess  # ruff:ignore[suspicious-subprocess-import]  # only fixed-argument, no-shell runs below
 import sys
@@ -1066,6 +1068,56 @@ def _varint(value: int) -> bytes:
     while value := value >> 7:
         groups.insert(0, value & 0x7F | 0x80)
     return bytes(groups)
+
+
+@pytest.mark.parametrize(
+    ("rows", "unique_per_row", "row_length"),
+    [
+        pytest.param(100, 0, 0, id="many-tables"),
+        pytest.param(20, 0, 4000, id="long-plain-rows"),
+        pytest.param(20, 270, 4000, id="many-unique-constraints"),
+    ],
+)
+def test_read_write_lock_refuses_large_application_schema(
+    tmp_path: Path, rows: int, unique_per_row: int, row_length: int
+) -> None:
+    database = tmp_path / "lock.db"
+    columns = string.ascii_lowercase
+    constraints = "".join(
+        f",UNIQUE({first},{second})"
+        for first, second in itertools.islice(itertools.permutations(columns, 2), unique_per_row)
+    )
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute("CREATE TABLE application (value)")
+        for number in range(rows):
+            # Plain DDL rather than writable_schema edits, which a SQLite built in defensive mode (macOS's) refuses.
+            statement = f"CREATE TABLE t{number}({','.join(columns)}{constraints}"
+            connection.execute(f"{statement}{' ' * max(row_length - len(statement) - 1, 0)})")
+        connection.commit()
+
+    with pytest.raises(ValueError, match="schema"):
+        ReadWriteLock(database, is_singleton=False).acquire_read(timeout=1)
+
+
+def test_read_write_lock_accepts_small_application_schema(tmp_path: Path) -> None:
+    database = tmp_path / "lock.db"
+    with closing(sqlite3.connect(database)) as connection:
+        connection.executescript("".join(f"CREATE TABLE t{number}(value);" for number in range(20)))
+
+    with (
+        closing(ReadWriteLock(database, is_singleton=False)) as reader,
+        closing(ReadWriteLock(database, is_singleton=False)) as writer,
+        reader.read_lock(),
+        pytest.raises(Timeout),
+    ):
+        writer.acquire_write(blocking=False)
+
+
+# https://www.sqlite.org/fileformat.html
+_PAGE_SIZE: Final[int] = 4096
+
+
+_TABLE_LEAF_PAGE: Final[int] = 0x0D
 
 
 _NEEDS_POSIX_HARD_LINK: Final[pytest.MarkDecorator] = pytest.mark.skipif(
