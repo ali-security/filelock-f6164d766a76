@@ -892,20 +892,22 @@ def _reclaim_private_record(
     if not stat.S_ISREG(private_stat.st_mode):
         msg = f"{Path(directory, private_name)} is not a regular private record"
         raise OSError(msg)
-    if private_stat.st_nlink == 1 and (
-        (current := now()) is None or current - private_stat.st_mtime < _PRIVATE_RECORD_GRACE
-    ):
-        return
-    try:
-        _unlink_private_record_once(directory_ref, private_name)
-    except FileNotFoundError:
-        pass
-    except OSError as error:
-        if error.errno not in {EACCES, EPERM}:
-            raise
+    # Closing a delete handle can wait indefinitely for another process's read-handle oplock.
+    if sys.platform != "win32":  # pragma: win32 no cover
+        if private_stat.st_nlink == 1 and (
+            (current := now()) is None or current - private_stat.st_mtime < _PRIVATE_RECORD_GRACE
+        ):
+            return
+        try:
+            _unlink_private_record_once(directory_ref, private_name)
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            if error.errno not in {EACCES, EPERM}:
+                raise
 
 
-def _filesystem_now(directory_ref: tuple[str, int | None], public_name: str) -> float | None:
+def _filesystem_now(directory_ref: tuple[str, int | None], public_name: str) -> float | None:  # pragma: win32 no cover
     # A network filesystem stamps mtimes with the server's clock, which can run seconds off this client's, so read "now"
     # as the mtime of a probe written like a record (liblockfile uses a read's atime). The probe has a private-record
     # name, so a scan reaps one left behind. Without a stamp no age is trusted.
@@ -927,7 +929,9 @@ def _filesystem_now(directory_ref: tuple[str, int | None], public_name: str) -> 
             _unlink_private_record_once(directory_ref, probe)
 
 
-def _unlink_private_record_once(directory_ref: tuple[str, int | None], private_name: str) -> None:
+def _unlink_private_record_once(  # pragma: win32 no cover
+    directory_ref: tuple[str, int | None], private_name: str
+) -> None:
     directory, directory_fd = directory_ref
     if directory_fd is not None and _UNLINK_SUPPORTS_DIR_FD:  # pragma: needs dir-fd
         os.unlink(private_name, dir_fd=directory_fd)

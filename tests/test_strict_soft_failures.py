@@ -54,6 +54,9 @@ _NEEDS_FD_DIRECTORY: Final[pytest.MarkDecorator] = pytest.mark.skipif(
 
 # Only NTFS refuses every open of a name whose deletion is pending while the deleting handle stays open.
 _WINDOWS_ONLY: Final[pytest.MarkDecorator] = pytest.mark.skipif(sys.platform != "win32", reason="Windows only")
+_POSIX_PRIVATE_RECLAIM: Final[pytest.MarkDecorator] = pytest.mark.skipif(
+    sys.platform == "win32", reason="Windows does not reclaim private records during scans"
+)
 _NEEDS_FILE_LEASE: Final[pytest.MarkDecorator] = pytest.mark.skipif(
     not CAPABILITIES["file-lease"], reason="leasing the sentinel needs Linux F_SETLEASE on a supported filesystem"
 )
@@ -546,6 +549,7 @@ def test_strict_soft_non_regular_sentinel_private_node_fails_closed(tmp_path: Pa
     assert private_path.is_dir() if node == "directory" else private_path.is_symlink()
 
 
+@_POSIX_PRIVATE_RECLAIM  # pragma: win32 no cover
 def test_strict_soft_reaper_does_not_retry_sharing_error(
     abandoned_record: tuple[Path, Path], mocker: MockerFixture
 ) -> None:
@@ -586,6 +590,7 @@ def test_strict_soft_reaper_ages_records_by_filesystem_clock(
         assert private_path.read_bytes() == b"in-flight publication"
 
 
+@_POSIX_PRIVATE_RECLAIM  # pragma: win32 no cover
 def test_strict_soft_reaper_without_filesystem_clock_keeps_records(
     abandoned_record: tuple[Path, Path], mocker: MockerFixture
 ) -> None:
@@ -619,7 +624,7 @@ def test_strict_soft_claims_inspection_creates_no_file(
     )
 
 
-def _fail_probe_stamp(mocker: MockerFixture) -> None:
+def _fail_probe_stamp(mocker: MockerFixture) -> None:  # pragma: win32 no cover
     real_write: Final = os.write
 
     def enospc_on_probe(fd: int, data: bytes) -> int:
@@ -630,7 +635,7 @@ def _fail_probe_stamp(mocker: MockerFixture) -> None:
     mocker.patch("os.write", autospec=True, side_effect=enospc_on_probe)
 
 
-def _fail_probe_removal(mocker: MockerFixture) -> None:
+def _fail_probe_removal(mocker: MockerFixture) -> None:  # pragma: win32 no cover
     real_unlink: Final = os.unlink
 
     def eio_on_probe(path: _PathValue, *, dir_fd: int | None = None) -> None:
@@ -642,6 +647,7 @@ def _fail_probe_removal(mocker: MockerFixture) -> None:
 
 
 # An unstamped probe reads no time, so the record's age is untrusted; a probe left behind still read the time.
+@_POSIX_PRIVATE_RECLAIM  # pragma: win32 no cover
 @pytest.mark.parametrize(
     ("fail_probe", "kept"),
     [pytest.param(_fail_probe_stamp, True, id="stamp"), pytest.param(_fail_probe_removal, False, id="remove")],
