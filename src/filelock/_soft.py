@@ -34,6 +34,7 @@ from filelock._util import (
     exchange_back,
     exchange_names,
     exchange_supported,
+    foreign_owner,
     pin_inode,
     raise_on_not_writable_file,
     remove_own_file,
@@ -280,7 +281,7 @@ class SoftFileLock(BaseFileLock):
 
     def _restore_claimed(self, own: str, breaker_pid: int, marker: os.stat_result) -> bool:  # pragma: win32 no cover
         try:
-            content, _ = _read_lock_file(own)
+            content, record = _read_lock_file(own)
         except OSError:
             self._return_claim(own, breaker_pid)
             return True
@@ -291,8 +292,10 @@ class SoftFileLock(BaseFileLock):
         # The inode of the marker judged dead must still be at the path, or a peer has acted since.
         with suppress(OSError):
             current = os.lstat(self.lock_file)
-            if (current.st_ino, current.st_mtime) == (marker.st_ino, marker.st_mtime) and exchange_names(
-                own, self.lock_file
+            if (
+                foreign_owner(record, Path(self.lock_file).parent.stat()) is None
+                and (current.st_ino, current.st_mtime) == (marker.st_ino, marker.st_mtime)
+                and exchange_names(own, self.lock_file)
             ):
                 if os.lstat(own).st_ino == marker.st_ino:
                     Path(own).unlink()
