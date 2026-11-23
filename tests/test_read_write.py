@@ -22,6 +22,7 @@ pytest.importorskip("sqlite3")
 import sqlite3
 
 from filelock import ReadWriteLock, Timeout
+from filelock._read_write import _ForkSafeConnection  # simplint: ignore[private-import-path]  # patched below
 from tests.capability_marks import SKIP_ON_UNRELIABLE_PROCESS_SYNC
 from tests.process_helpers import cleanup_processes
 from tests.read_write_helpers import assert_read_write_lock_state
@@ -577,6 +578,27 @@ def test_read_write_lock_refuses_a_database_converted_to_wal_after_construction(
     _convert_to_wal(lock_file)
     with pytest.raises(ValueError, match="WAL-mode"):
         lock.acquire_read()
+    lock.close()
+
+
+@pytest.mark.parametrize("mode", [pytest.param("read", id="read"), pytest.param("write", id="write")])
+def test_read_write_lock_refuses_wal_switch_during_acquire(
+    lock_file: str, mocker: MockerFixture, mode: Literal["read", "write"]
+) -> None:
+    lock = ReadWriteLock(lock_file, is_singleton=False)
+    executescript = _ForkSafeConnection.executescript
+
+    def switch_then_execute(connection: _ForkSafeConnection, script: str) -> sqlite3.Cursor:
+        if "BEGIN" in script:
+            with closing(sqlite3.connect(lock_file)) as switched:
+                switched.executescript("PRAGMA journal_mode=WAL; PRAGMA user_version=1;")
+        return executescript(connection, script)
+
+    mocker.patch.object(_ForkSafeConnection, "executescript", new=switch_then_execute)
+    with pytest.raises(ValueError, match="switched to WAL mode while acquiring"):
+        getattr(lock, f"acquire_{mode}")()
+    with pytest.raises(RuntimeError, match="not held"):
+        lock.release()
     lock.close()
 
 
