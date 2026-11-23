@@ -33,7 +33,7 @@ from filelock._identity import host_name, owner_is_stale, process_start_token
 from filelock._marker import parse_marker
 from filelock._soft import MALFORMED_LOCK_AGE_THRESHOLD, _parse_lock_holder
 from filelock._soft_protocol import STRICT_SOFT_SENTINEL_RECORD
-from filelock._util import ensure_directory_exists, foreign_directory_owner, write_all
+from filelock._util import ensure_directory_exists, foreign_owner, write_all
 
 if sys.platform == "win32":  # pragma: win32 cover
     from filelock._windows import _is_unlinked, _open_deletable_for_reading, _pin_directory, _unpin_directory
@@ -1208,7 +1208,7 @@ def _ensure_protocol_directory(lock_file: str, directory: Path, mode: int, paren
     except FileExistsError:
         try:
             found = _lstat_relative((os.fspath(directory.parent), parent_fd), directory.name)
-            owner = foreign_directory_owner(
+            owner = foreign_owner(
                 found, directory.parent.stat() if parent_fd is None else os.fstat(parent_fd)
             )
         except OSError as error:

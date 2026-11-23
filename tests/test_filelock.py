@@ -54,6 +54,7 @@ from tests.capability_marks import (
     NEEDS_FCNTL,
     NEEDS_FILE_MODE,
     NEEDS_FILE_PERMISSIONS,
+    NEEDS_FOREIGN_STICKY_TMP,
     NEEDS_PARENT_SYMLINK_COLLAPSE,
     NEEDS_PROMPT_FINALIZATION,
     NEEDS_SYMLINK,
@@ -1616,6 +1617,24 @@ def test_permission_error_propagates_when_file_missing(tmp_path: Path, mocker: M
     mocker.patch("os.open", side_effect=open_always_permission_error)
     with pytest.raises(PermissionError, match="Permission denied"):
         lock.acquire(timeout=0)
+
+
+@NEEDS_FCNTL
+@NEEDS_FOREIGN_STICKY_TMP
+@pytest.mark.usefixtures("directories_of_another_account")
+def test_lock_file_of_another_account_under_sticky_parent_is_refused(  # pragma: needs foreign-sticky-tmp
+    lock_path_in_shared_tmp: Path,
+) -> None:
+    # Its owner could unlink it during the hold, letting a second process lock a new file at the same path.
+    lock_path_in_shared_tmp.touch()
+    lock = FileLock(lock_path_in_shared_tmp, timeout=0, is_singleton=False)
+
+    with pytest.raises(PermissionError, match="not to this process's account") as raised:
+        lock.acquire()
+    # The error names the path the lock was given: this lock does not resolve it, and /tmp is a symlink to /private/tmp
+    # on macOS.
+    expected = (str(lock_path_in_shared_tmp), False, True)
+    assert (raised.value.filename, lock.is_locked, lock_path_in_shared_tmp.exists()) == expected
 
 
 @NEEDS_FCNTL  # pragma: needs fcntl

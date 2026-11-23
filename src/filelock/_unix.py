@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Final, cast
 
 from filelock._api import BaseFileLock
-from filelock._util import ensure_directory_exists, remove_own_file
+from filelock._util import ensure_directory_exists, foreign_owner, remove_own_file
 
 has_fcntl = False
 if sys.platform == "win32":  # pragma: win32 cover
@@ -202,6 +202,13 @@ else:  # pragma: win32 no cover
                     ):
                         reason = (
                             "lock file has another hard link where other accounts can write; on_acquired cannot take it"
+                        )
+                        raise PermissionError(EACCES, reason, self.lock_file)
+                    # The owner of a file under a sticky parent may unlink it during the hold. A contender then locks a
+                    # new inode at the path, and both hold the lock.
+                    if (owner := foreign_owner(stat_result, parent)) is not None:  # pragma: needs foreign-sticky-tmp
+                        reason = (
+                            f"lock file belongs to uid {owner}, not to this process's account or the directory's owner"
                         )
                         raise PermissionError(EACCES, reason, self.lock_file)
                     keep = True

@@ -20,7 +20,7 @@ from filelock._soft_rw._protocol import (
     TreeReplacedError,
 )
 from filelock._strict import _link_no_follow, _pin_directories, _raise_if_hard_links_unsupported
-from filelock._util import ensure_directory_exists, foreign_directory_owner, write_all
+from filelock._util import ensure_directory_exists, foreign_owner, write_all
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -175,7 +175,7 @@ class OsFiles:
             ):
                 msg = f"{directory} exists but is not a directory or is a symlink; refusing to use it"
                 raise TreeReplacedError(msg)
-            owner = foreign_directory_owner(found, parent)
+            owner = foreign_owner(found, parent)
             if owner is not None:  # pragma: needs foreign-sticky-tmp
                 msg = f"{directory} belongs to uid {owner}, not to this process's account or the parent's owner"
                 raise TreeReplacedError(msg)
@@ -257,7 +257,7 @@ class OsFiles:
         if (found.st_dev, found.st_ino) == self._identities.get(path):
             return
         parent = os.fstat(parent_fd) if parent_fd is not None else Path(path).parent.stat()
-        if (owner := foreign_directory_owner(found, parent)) is not None:  # pragma: needs foreign-sticky-tmp
+        if (owner := foreign_owner(found, parent)) is not None:  # pragma: needs foreign-sticky-tmp
             msg = f"{path} belongs to uid {owner}, not to this process's account or the parent's owner"
             raise TreeReplacedError(msg)
         self._identities[path] = found.st_dev, found.st_ino
