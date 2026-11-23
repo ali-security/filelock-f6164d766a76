@@ -413,6 +413,7 @@ class SoftReadWriteLock(metaclass=_SoftRWMeta):
 
         :raises RuntimeError: if no lock is currently held and *force* is ``False``, or if a write lock is held by
             another thread and *force* is ``False``
+        :raises SoftFileLockProtocolError: if peers keep winning generation updates until the holder's stale threshold
 
         """
         if self._creator_pid != os.getpid():  # pragma: forked child

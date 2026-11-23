@@ -238,6 +238,7 @@ class AsyncSoftReadWriteLock:
         :param force: if ``True``, drop the calling task's whole hold at any nesting level
 
         :raises RuntimeError: if the calling task holds no lock and *force* is ``False``
+        :raises SoftFileLockProtocolError: if peers keep winning generation updates until the holder's stale threshold
 
         """
         if self._creator_pid == os.getpid():
