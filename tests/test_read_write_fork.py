@@ -1009,6 +1009,48 @@ def _fork_at_sqlite_boundary_script() -> str:
     )
 
 
+@NEEDS_FORK  # pragma: needs fork
+@_NEEDS_FD_DIRECTORY  # pragma: needs fd-directory
+@pytest.mark.skipif(not CAPABILITIES["posix-hard-link"], reason="cleanup needs private links")
+def test_private_link_sweep_releases_the_inherited_cursor(tmp_path: Path) -> None:  # pragma: needs posix-hard-link
+    result = _run_fork_script(
+        textwrap.dedent("""
+        import os
+        import sys
+        from pathlib import Path
+
+        from filelock import ReadWriteLock
+        from filelock import _read_write
+
+        def descriptors_on(node):
+            count = 0
+            for entry in (Path("/dev/fd") if Path("/dev/fd").is_dir() else Path("/proc/self/fd")).iterdir():
+                try:
+                    count += os.path.samestat(os.fstat(int(entry.name)), node)
+                except OSError:  # the descriptor that listed the directory is already closed
+                    pass
+            return count
+
+        parent = Path(sys.argv[1])
+        parent.chmod(0o777)
+        node = parent.stat()
+        _read_write._MAX_TRANSITION_WAIT = 0
+        ReadWriteLock(parent / "lock.db", is_singleton=False).close()
+        assert descriptors_on(node) == 1
+        child = os.fork()
+        if child == 0:
+            assert descriptors_on(node) == 0
+            sys.exit(0)
+        _, status = os.waitpid(child, 0)
+        assert os.waitstatus_to_exitcode(status) == 0
+        assert descriptors_on(node) == 1
+        """),
+        [str(tmp_path)],
+        timeout=10,
+    )
+    assert result == (0, "", "")
+
+
 def _idle_fork_script() -> str:
     return textwrap.dedent(
         """

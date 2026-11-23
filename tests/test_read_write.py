@@ -656,6 +656,7 @@ def test_read_write_lock_refuses_a_database_moved_after_connect(
         factory: type[sqlite3.Connection],
         cached_statements: int,
         timeout: float,
+        uri: bool = False,
     ) -> sqlite3.Connection:
         connection = real_connect(
             database,
@@ -663,6 +664,7 @@ def test_read_write_lock_refuses_a_database_moved_after_connect(
             factory=factory,
             cached_statements=cached_statements,
             timeout=timeout,
+            uri=uri,
         )
         if replace:
             (replacement := tmp_path / "replacement.db").touch()
@@ -1400,6 +1402,7 @@ def test_shared_directory_keeps_sqlite_off_the_name_of_an_unlinked_database(  # 
         factory: type[sqlite3.Connection],
         cached_statements: int,
         timeout: float,
+        uri: bool = False,
     ) -> sqlite3.Connection:
         shared_database.unlink()
         shared_database.hardlink_to(kept)
@@ -1409,6 +1412,7 @@ def test_shared_directory_keeps_sqlite_off_the_name_of_an_unlinked_database(  # 
             factory=factory,
             cached_statements=cached_statements,
             timeout=timeout,
+            uri=uri,
         )
 
     mocker.patch("sqlite3.connect", autospec=True, side_effect=relink_then_connect)
@@ -1459,6 +1463,7 @@ def test_private_directory_under_a_shared_parent_refuses_a_replaced_directory(  
         factory: type[sqlite3.Connection],
         cached_statements: int,
         timeout: float,
+        uri: bool = False,
     ) -> sqlite3.Connection:
         private.rename(moved)
         private.mkdir(mode=0o700)
@@ -1476,6 +1481,7 @@ def test_private_directory_under_a_shared_parent_refuses_a_replaced_directory(  
             factory=factory,
             cached_statements=cached_statements,
             timeout=timeout,
+            uri=uri,
         )
 
     mocker.patch("sqlite3.connect", autospec=True, side_effect=replace_then_connect)
