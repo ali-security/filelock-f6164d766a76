@@ -18,7 +18,6 @@ from typing import TYPE_CHECKING, Final, cast
 if TYPE_CHECKING:
     import ctypes
     from collections.abc import Callable, Generator
-    from contextlib import AbstractContextManager
 
 
 def write_all(fd: int, data: bytes) -> None:
@@ -302,13 +301,19 @@ def _break_by_rename(
 
 if sys.platform == "win32":  # pragma: win32 cover
 
-    def _pinned_for_rename(path: str) -> AbstractContextManager[object]:
+    @contextmanager
+    def _pinned_for_rename(path: str) -> Generator[None]:
         # A rename by path waits on a Level 1 or batch oplock holder until it answers or closes. Opening first with
         # FILE_COMPLETE_IF_OPLOCKED turns that wait into BlockingIOError, and the open handle shares delete, so the
-        # rename then proceeds. Imported here because _windows imports this module.
-        from filelock._windows import open_for_delete_without_oplock_wait  # ruff:ignore[import-outside-top-level]
+        # rename then proceeds. A read-handle oplock outlives that open and is broken by the rename itself, whose wait
+        # for the holder is canceled after a grace. Imported here because _windows imports this module.
+        from filelock._windows import (  # ruff:ignore[import-outside-top-level]  # import cycle
+            cancelling_oplock_wait,
+            open_for_delete_without_oplock_wait,
+        )
 
-        return os.fdopen(open_for_delete_without_oplock_wait(path), "rb")
+        with os.fdopen(open_for_delete_without_oplock_wait(path), "rb"), cancelling_oplock_wait():
+            yield
 
     def unlink_path(path: str) -> None:
         from filelock._windows import unlink_without_oplock_wait  # ruff:ignore[import-outside-top-level]

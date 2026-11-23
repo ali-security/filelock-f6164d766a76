@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-__lazy_modules__ = ["filelock._util", "msvcrt", "struct"]
+__lazy_modules__ = ["filelock._util", "msvcrt", "struct", "threading"]
 
 import os
 import struct
 import sys
+import threading
 import time
-from contextlib import contextmanager, suppress
+from contextlib import ExitStack, contextmanager, suppress
 from errno import ENOENT, ENOTDIR, EWOULDBLOCK
 from functools import cache
 from typing import TYPE_CHECKING, Final, cast
@@ -89,6 +90,7 @@ if sys.platform == "win32":  # pragma: win32 cover
     _ACCESS_DENIED_PROBES: Final[int] = 250
     _ACCESS_DENIED_GRACE: Final[float] = 0.5
     _ACCESS_DENIED_RETRY: Final[float] = 0.002
+    _DUPLICATE_SAME_ACCESS: Final[int] = 0x00000002
 
     _ntdll: Final[ctypes.WinDLL] = ctypes.WinDLL("ntdll")
     _kernel32: Final[ctypes.WinDLL] = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -175,6 +177,18 @@ if sys.platform == "win32":  # pragma: win32 cover
 
     _kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
     _kernel32.CloseHandle.restype = wintypes.BOOL
+    _kernel32.DuplicateHandle.argtypes = [
+        wintypes.HANDLE,
+        wintypes.HANDLE,
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.HANDLE),
+        wintypes.DWORD,
+        wintypes.BOOL,
+        wintypes.DWORD,
+    ]
+    _kernel32.DuplicateHandle.restype = wintypes.BOOL
+    _kernel32.CancelSynchronousIo.argtypes = [wintypes.HANDLE]
+    _kernel32.CancelSynchronousIo.restype = wintypes.BOOL
     _kernel32.GetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.POINTER(_BY_HANDLE_FILE_INFORMATION)]
     _kernel32.GetFileInformationByHandle.restype = wintypes.BOOL
     _kernel32.LockFileEx.argtypes = [
@@ -402,8 +416,7 @@ if sys.platform == "win32":  # pragma: win32 cover
         Open *path* with delete access and return a descriptor, without waiting for an oplock holder to answer.
 
         The open handle shares read, write and delete, so a rename of *path* can proceed while the caller keeps it.
-        A holder that took an oplock through another handle is asked to answer by this open, which then raises, so the
-        caller skips the rename instead of waiting for it.
+        A read-handle oplock survives this open; the caller bounds its wait during the rename.
 
         :param path: the file to rename.
 
@@ -415,6 +428,38 @@ if sys.platform == "win32":  # pragma: win32 cover
 
         """
         return _open_existing_without_oplock_wait(path, _DELETE | _FILE_READ_ATTRIBUTES | _SYNCHRONIZE, os.O_RDONLY)
+
+    @contextmanager
+    def cancelling_oplock_wait() -> Generator[None]:
+        # A rename has no FILE_COMPLETE_IF_OPLOCKED. Cancel its wait if a read-handle oplock holder stays silent.
+        # Repeat because the first cancellation can precede the rename.
+        thread = wintypes.HANDLE()
+        process = _kernel32.GetCurrentProcess()
+        if not _kernel32.DuplicateHandle(
+            process,
+            _kernel32.GetCurrentThread(),
+            process,
+            ctypes.byref(thread),
+            0,
+            wintypes.BOOL(),
+            _DUPLICATE_SAME_ACCESS,
+        ):  # pragma: no cover  # a thread may duplicate its own handle
+            raise ctypes.WinError(ctypes.get_last_error())
+        done = threading.Event()
+
+        def cancel_until_done() -> None:
+            while not done.wait(_ACCESS_DENIED_GRACE):
+                _kernel32.CancelSynchronousIo(thread)
+
+        watchdog = threading.Thread(target=cancel_until_done, name="filelock-oplock-wait", daemon=True)
+        with ExitStack() as cleanup:
+            cleanup.callback(_kernel32.CloseHandle, thread)
+            cleanup.callback(lambda: watchdog.is_alive() and watchdog.join())
+            cleanup.callback(done.set)
+            # A finalizing interpreter cannot start a thread; keep the ordinary rename path available then.
+            with suppress(RuntimeError):  # pragma: no cover
+                watchdog.start()
+            yield
 
     def unlink_without_oplock_wait(path: str) -> None:
         """
@@ -773,6 +818,7 @@ __all__ = [
     "_pin_directory",
     "_pinned",
     "_unpin_directory",
+    "cancelling_oplock_wait",
     "open_for_delete_without_oplock_wait",
     "open_read_without_oplock_wait",
     "unlink_without_oplock_wait",
