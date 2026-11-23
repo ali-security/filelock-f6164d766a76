@@ -21,7 +21,7 @@ from tests.capability_marks import NEEDS_POSIX_SIGNALS, NEEDS_SYMLINK, NEEDS_UNL
 from tests.pid_namespace_helpers import pin_pid_namespace
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
+    from collections.abc import Callable, Generator
     from unittest.mock import MagicMock
 
     from pytest_mock import MockerFixture
@@ -531,9 +531,23 @@ def test_failed_acquire_cleanup_spares_a_replacement(lock_path: Path, mocker: Mo
     assert lock_path.exists()
 
 
+def _fstat_failing_for(lock_path: Path) -> Callable[[int], os.stat_result]:
+    # Fail only for descriptors naming the lock file: a blanket os.fstat failure also hits the interpreter's own fstat
+    # calls on unrelated descriptors (Termux's Python makes them), which would fail the test for the wrong reason.
+    real_fstat = os.fstat
+
+    def fstat(fd: int) -> os.stat_result:
+        st = real_fstat(fd)
+        if lock_path.exists() and os.path.samestat(st, os.stat(lock_path)):
+            raise OSError(ENODEV, "no identity")
+        return st
+
+    return fstat
+
+
 def test_publication_without_identity_leaves_the_marker(lock_path: Path, mocker: MockerFixture) -> None:
     # The rollback cannot prove the path still names the file it created, so it leaves the marker to stale handling.
-    mocker.patch("filelock._soft.os.fstat", autospec=True, side_effect=OSError(ENODEV, "no identity"))
+    mocker.patch("filelock._soft.os.fstat", autospec=True, side_effect=_fstat_failing_for(lock_path))
     lock: Final = SoftFileLock(lock_path)
     with pytest.raises(OSError, match="no identity"):
         lock.acquire()
@@ -545,7 +559,7 @@ def test_release_without_identity_skips_unlink(lock_path: Path, mocker: MockerFi
     lock.acquire()
     # The held descriptor can no longer be identified, so release cannot prove the path is still ours: it closes and
     # clears held state without unlinking rather than risk deleting a successor's marker.
-    mocker.patch("filelock._soft.os.fstat", side_effect=OSError)
+    mocker.patch("filelock._soft.os.fstat", side_effect=_fstat_failing_for(lock_path))
     lock.release()
     assert not lock.is_locked
     assert lock_path.exists()

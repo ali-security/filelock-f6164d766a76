@@ -1,9 +1,6 @@
 name: 🚀 Release
 on:
-  push:
-    branches: ["main"]
-    tags: ["[0-9]+.[0-9]+.[0-9]+"]
-  pull_request:
+  workflow_dispatch:
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
@@ -15,6 +12,7 @@ jobs:
   build:
     name: 📦 build
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -28,7 +26,12 @@ jobs:
         with:
           python-version: "3.15"
           enable-cache: false # this workflow builds the artifact that gets published; no cache to poison
+      - name: 📌 Pin the build backend to the version the public wheel was built with
+        run: echo "hatchling==1.32.4" > "$RUNNER_TEMP/build-constraints.txt"
       - name: 📦 Build package
+        env:
+          SETUPTOOLS_SCM_PRETEND_VERSION: "4.2.0"
+          UV_BUILD_CONSTRAINT: ${{ runner.temp }}/build-constraints.txt
         run: uv build --python 3.15 --python-preference only-managed --sdist --wheel . --out-dir dist
       - name: 📤 Store the distribution packages
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -38,8 +41,9 @@ jobs:
   publish:
     name: 🚀 publish
     needs: [build]
-    if: startsWith(github.ref, 'refs/tags/')
+    if: false
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     environment:
       name: release
       url: https://pypi.org/project/filelock/${{ github.ref_name }}

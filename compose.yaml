@@ -15,4 +15,6 @@ services:
       - .:/repo:ro
     # $$HOME escapes compose's own interpolation so the container's shell expands it (compose would substitute the host's).
     # Termux has not packaged Python 3.15: https://github.com/termux/termux-packages/issues/32434
-    command: ["bash", "-lc", "cp -a /repo \"$$HOME/work\" && cd \"$$HOME/work\" && pip install -q . && exec tox run -e py -x env.py.base_python=3.14 -x env_pkg_base.default_base_python=3.14"]
+    # Sealed build: the host env does not reach the Termux userland, so -rs (print every skip reason) and the filelock
+    # 3.20.0 client that tests/test_strict_soft_compat.py needs are set up in here.
+    command: ["bash", "-lc", "cp -a /repo \"$$HOME/work\" && cd \"$$HOME/work\" && pip install -q . && pip install -q --no-deps --target \"$$HOME/filelock-3.20.0\" filelock==3.20.0 && export PYTEST_ADDOPTS=-rs FILELOCK_OLD_CLIENT_PATH=\"$$HOME/filelock-3.20.0\" && exec tox run -e py -x env_run_base.pass_env+=FILELOCK_OLD_CLIENT_PATH -x env.py.base_python=3.14 -x env_pkg_base.default_base_python=3.14"]
