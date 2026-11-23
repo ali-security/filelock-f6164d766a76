@@ -18,6 +18,27 @@ def pin_pid_namespace(mocker: MockerFixture, namespace: int | OSError) -> None:
     _pin_namespace(mocker, Path("/proc/self/ns/pid"), namespace)
 
 
+def pin_proc_pid_namespace(  # pragma: linux cover
+    mocker: MockerFixture, self_link: str | OSError, status: str | OSError
+) -> None:
+    link = (
+        mocker.create_autospec(Path.readlink, side_effect=self_link)
+        if isinstance(self_link, OSError)
+        else mocker.create_autospec(Path.readlink, return_value=Path(self_link.format(pid=os.getpid())))
+    )
+    answer = (
+        mocker.create_autospec(Path.read_bytes, side_effect=status)
+        if isinstance(status, OSError)
+        else mocker.create_autospec(Path.read_bytes, return_value=status.format(pid=os.getpid()).encode())
+    )
+    readlink = Path.readlink
+    read_bytes = Path.read_bytes
+    mocker.patch.object(Path, "readlink", new=lambda path: link(path) if path == Path("/proc/self") else readlink(path))
+    mocker.patch.object(
+        Path, "read_bytes", new=lambda path: answer(path) if path == Path("/proc/self/status") else read_bytes(path)
+    )
+
+
 def pin_time_namespace(  # pragma: linux cover
     mocker: MockerFixture, namespace: int | OSError, offsets: str | OSError, *, for_children: int | None = None
 ) -> None:
